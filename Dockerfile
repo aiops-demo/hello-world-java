@@ -1,6 +1,6 @@
 FROM adoptopenjdk/openjdk8:ubi-jre
 RUN mkdir /opt/app
-COPY target/app.jar /opt/app/app.jar
+COPY target/javaspringapp-1.0-SNAPSHOT.jar /opt/app/app.jar
 ENV PORT 8080
 EXPOSE 8080
 
