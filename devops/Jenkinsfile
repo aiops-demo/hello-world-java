@@ -1,0 +1,222 @@
+pipeline {
+  
+  agent {
+    kubernetes {
+      yaml """
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    some-label: test-odu
+spec:
+  securityContext:
+    runAsUser: 10000
+    runAsGroup: 10000
+  containers:
+  - name: jnlp
+    image: 'jenkins/jnlp-slave:4.3-4-alpine'
+    args: ['\$(JENKINS_SECRET)', '\$(JENKINS_NAME)']
+
+  - name: yair
+    image: us.icr.io/dc-tools/security/yair:1
+    command:
+    - cat
+    tty: true
+    imagePullPolicy: Always
+
+  - name: kaniko
+    image: gcr.io/kaniko-project/executor:debug-1534f90c9330d40486136b2997e7972a79a69baf
+    imagePullPolicy: Always
+    command:
+    - cat
+    tty: true
+    volumeMounts:
+      - name: regsecret
+        mountPath: /kaniko/.docker
+    securityContext: # https://github.com/GoogleContainerTools/kaniko/issues/681
+      runAsUser: 0
+      runAsGroup: 0
+
+  - name: ibm-cloud-developer-tools
+    image: ibmcom/ibm-cloud-developer-tools-amd64
+    command:
+    - cat
+    tty: true
+    securityContext: # https://github.com/GoogleContainerTools/kaniko/issues/681
+      runAsUser: 0
+      runAsGroup: 0
+  volumes:
+  - name: regsecret
+    projected:
+      sources:
+      - secret:
+          name: regsecret
+          items:
+            - key: .dockerconfigjson
+              path: config.json
+  imagePullSecrets:
+  - name: regsecret
+"""
+    }
+  }
+
+
+  environment {
+    /* -----------DevOps Commander  created env variables------------ */
+
+    //CLAIR_URL= "https://clair-3-3.container-crush-02-4044f3a4e314f4bcb433696c70d13be9-0000.eu-de.containers.appdomain.cloud/v1/namespaces"
+
+    CLAIR_URL = "http://clair-3-3-clair:6060"
+    CLAIR_USERNAME = ""
+    CLAIR_CREDENTIAL_ID = "dc-clair-3"
+
+    DOCKER_URL= "us.icr.io/dc-tools"
+  /*
+    IBMCLOUD_URL = "cloud.ibm.com"
+    IBMCLOUD_REGION = "us-south"
+    IBMCLOUD_API_KEY = ""
+    IBMCLOUD_CLUSTER = "mycluster"
+    IBMCLOUD_NAMESPACE = "tools-test"
+    IBMCLOUD_INGRESS = "mycluster-496119-7e2996fc95fd6eb4a4c7a63aa3e73699-0000.us-south.containers.appdomain.cloud"
+*/
+
+    /* -----------DevOps Commander  created env variables------------ */
+    /* Maven version. Needs to match version declared into pom.xml */
+    VERSION = "1-SNAPSHOT"
+
+    /* Parameters for Docker image that will be built and deployed */
+    /* REGISTRY_USERNAME provided via a Jenkins secret
+     * REGISTRY_PASSWORD provided via a Jenkins secret
+     */
+    REGISTRY_SECRET = "odu-registry"
+    DOCKER_IMAGE = readMavenPom().getArtifactId()
+    // DOCKER_TAG = "$BUILD_NUMBER"
+    DOCKER_TAG = readMavenPom().getVersion()
+    DEPENDENCYTRACK_CREDENTIAL_APIKEY_ID = "odu-dtrack"
+    TARGET_TESTURL = "http://bodgeit-test-svc/bodgeit/"
+    componentName = readMavenPom().getArtifactId()
+    componentVersion = readMavenPom().getVersion()
+  }
+  stages {
+
+    stage('Develop: Checkout') {
+      steps {
+        withMaven(
+          maven: 'maven-3',
+          mavenLocalRepo: '.repository'
+        ) {
+          /* The reports dir is used to store outputs of DependencyCheck, Clair and ZAP analysis */
+          sh '''
+               mvn clean
+               mkdir - p reports
+             '''
+        }
+      }
+    }
+
+
+    stage('Build: Maven') {
+      steps {
+        withMaven(
+          maven: 'maven-3',
+          mavenLocalRepo: '.repository'
+        ) {
+              sh 'mvn compile'
+        }
+      }
+    }
+
+    stage('Build: Application Package') {
+      steps {
+        withMaven(
+          maven: 'maven-3',
+          mavenLocalRepo: '.repository'
+        ) {
+              sh 'mvn package && ls -ltr'
+              sh 'mv target/${componentName}-${componentVersion}.jar target/app.jar'
+        }
+      }
+    }
+
+    stage('Build: Docker') {
+      steps {
+        container('kaniko') {
+          /* Kaniko uses secret 'regsecret' declared in the POD to authenticate to the registry and push the image */
+          sh '''
+             pwd && ls -l && df -h
+             cat /kaniko/.docker/config.json
+             /kaniko/executor -f \
+             `pwd`/Dockerfile -c \
+             `pwd` --insecure \
+             --skip-tls-verify \
+             --cache=true \
+             --destination=${DOCKER_URL}/${DOCKER_IMAGE}:${DOCKER_TAG}
+             '''
+        }
+      }
+    }
+     stage('Scan:Appscan') {
+	         steps {
+	         container('maven') {
+                   
+
+                //sh 'apk add  zip'
+                //sh "wget https://cloud.appscan.com/api/SCX/StaticAnalyzer/SAClientUtil?os=linux"
+                sh 'ls -ltr'
+                
+                //sh 'tar -zxvf SAClientUtil?os=linux'
+                sh 'pwd'
+                
+               // sh 'export PATH=$PATH:/home/jenkins/agent/workspace/Appscantest-7/SAClientUtil.8.0.1461/bin'
+                sh 'echo $PATH'
+                //sh 'zip -r SAClientUtil_0.1.8_linux_gui.zip SAClientUtil_0.1.8_linux_gui'
+               
+	            sh 'mvn package com.hcl.security:appscan-maven-plugin:analyze  -DappId=${APPSCAN_APPID} -DappscanKey=${APPSCAN_KEYID}  -DappscanSecret=${APPSCAN_SECRET}'
+
+	       }
+	   }
+	   }
+
+
+    stage('Deploy: To IBM Cloud') {
+        steps {
+          container('ibm-cloud-developer-tools') {
+              sh '''
+              ibmcloud login -a "${IBMCLOUD_URL}" -r "${IBMCLOUD_REGION}" --apikey "${IBMCLOUD_API_KEY}"
+              ibmcloud ks cluster config --cluster "${IBMCLOUD_CLUSTER}"
+              # kubectl config set-context --current --namespace="${IBMCLOUD_NAMESPACE}"
+
+
+              pwd
+              ls -ltr
+
+              kubectl create secret docker-registry docker-repo-cred \
+              --docker-server=${DOCKER_URL} \
+              --docker-username=${DOCKER_USERNAME} \
+              --docker-password=${DOCKER_PASSWORD} \
+              --docker-email=${DOCKER_EMAIL} \
+              --namespace=${IBMCLOUD_NAMESPACE} \
+              || true
+
+              sed -e "s~{REGISTRY_NAME}~$DOCKER_URL~g" \
+                  -e "s~{DOCKER_IMAGE}~$DOCKER_IMAGE~g" \
+                  -e "s~{DOCKER_TAG}~$DOCKER_TAG~g" \
+                  -e "s~{K8S_DEPLOYMENT}~$componentName~g" \
+                  -e "s~{INGRESS_URL}~$IBMCLOUD_INGRESS~g" -i devops/k8s/*.yml
+
+              kubectl apply -f devops/k8s/ --namespace="${IBMCLOUD_NAMESPACE}" \
+              || true
+
+              kubectl wait --for=condition=available --timeout=120s deployment/${componentName} --namespace="${IBMCLOUD_NAMESPACE}" \
+              || true
+
+              '''
+                  }
+             }
+        }
+
+
+
+
+    }
+}
